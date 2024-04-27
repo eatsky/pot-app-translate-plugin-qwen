@@ -1,47 +1,66 @@
-use serde_json::Value;
+use reqwest::header;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::error::Error;
-use urlencoding::encode;
 
 #[no_mangle]
 pub fn translate(
-    text: &str, // 待翻译文本
-    from: &str, // 源语言
-    to: &str,   // 目标语言
-    // (pot会根据info.json 中的 language 字段传入插件需要的语言代码，无需再次转换)
-    detect: &str, // 检测到的语言 (若使用 detect, 需要手动转换)
-    needs: HashMap<String, String>, // 插件需要的其他参数,由info.json定义
+    text: &str,
+    _from: &str,
+    to: &str,
+    _detect: &str,
+    needs: HashMap<String, String>,
 ) -> Result<Value, Box<dyn Error>> {
     let client = reqwest::blocking::ClientBuilder::new().build()?;
-
-    let mut url = match needs.get("requestPath") {
-        Some(url) => url.to_string(),
-        None => "lingva.pot-app.com".to_string(),
+    // api
+    let api_key = match needs.get("api_key") {
+        Some(key) => key.to_string(),
+        None => {
+            return Err("API key is missing".into());
+        }
     };
-    if url.is_empty() {
-        url = "lingva.pot-app.com".to_string();
-    }
-    if !url.starts_with("http") {
-        url = format!("https://{}", url);
-    }
+    let api_string = format!("Bearer {}", api_key);
+    // model
+    let default_model = "Qwen/Qwen1.5-14B-Chat".to_string();
+    let model_string = needs.get("model_string").unwrap_or(&default_model);
+    // system prompt
+    let default_system_prompt = format!("你是一位翻译家，请把下面的内容翻译成{to}:");
+    let system_prompt = needs.get("system_prompt").unwrap_or(&default_system_prompt);
+    // url
+    let default_url = "https://api.together.xyz/v1/chat/completions".to_string();
+    let url = needs.get("url").unwrap_or(&default_url);
 
-    let plain_text = text.replace("/", "@@");
-    let encode_text = encode(plain_text.as_str());
+    let mut headers = header::HeaderMap::new();
+    headers.insert("Authorization", header::HeaderValue::from_str(&api_string)?);
+    headers.insert(
+        "accept",
+        header::HeaderValue::from_static("application/json"),
+    );
+    headers.insert(
+        "content-type",
+        header::HeaderValue::from_static("application/json"),
+    );
 
-    let res: Value = client
-        .get(format!("{url}/api/v1/{from}/{to}/{encode_text}"))
-        .send()?
-        .json()?;
+    let data = json!({
+    "model": model_string,
+    "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": text}
+        ]
+    });
 
-    fn parse_result(res: Value) -> Option<String> {
-        let result = res.as_object()?.get("translation")?.as_str()?.to_string();
+    let res = client.post(url).headers(headers).json(&data).send()?;
 
-        Some(result.replace("@@", "/"))
-    }
-    if let Some(result) = parse_result(res) {
-        return Ok(Value::String(result));
-    } else {
-        return Err("Response Parse Error".into());
+    let status = res.status();
+    match status {
+        reqwest::StatusCode::OK => {
+            let result_text = res.text()?;
+            let result: Value = serde_json::from_str(&result_text)?;
+            return Ok(result["choices"][0]["message"]["content"].to_owned());
+        }
+        _ => {
+            return Err(format!("Error {}: {}", status, res.text()?).into());
+        }
     }
 }
 
@@ -51,8 +70,8 @@ mod tests {
     #[test]
     fn try_request() {
         let mut needs = HashMap::new();
-        needs.insert("requestPath".to_string(), "lingva.pot-app.com".to_string());
-        let result = translate("你好 世界！", "auto", "en", "zh_cn", needs).unwrap();
-        println!("{result}");
+        needs.insert("api_key".to_string(), "YOUR_API_KEY".to_string()); // Replace YOUR_API_KEY with your api key
+        let result = translate("你好 世界！", "", "英语", "", needs).unwrap();
+        println!("{:}", result.as_str().unwrap());
     }
 }
